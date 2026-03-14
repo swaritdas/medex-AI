@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MedExplain AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+:root{--bg:#f7f8fb;--surface:#fff;--surface-alt:#f1f4f8;--border:#e3e7ed;--border-focus:#1a6fa0;--text:#0c1b2e;--text-2:#4a5d72;--text-3:#8a97a8;--accent:#1a6fa0;--accent-soft:#e6f1f8;--accent-hover:#155d87;--danger:#be3a34;--danger-soft:#fdf0ef;--warn:#c9800a;--warn-soft:#fef8ec;--ok:#1a845a;--ok-soft:#edf7f2;--hd:'Plus Jakarta Sans',system-ui,sans-serif;--bd:'Newsreader',Georgia,serif;--r:10px;--rl:14px}
+*{box-sizing:border-box;margin:0;padding:0}body{background:var(--bg);font-family:var(--hd)}
+@keyframes up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes bounce{0%,80%,100%{transform:translateY(0);opacity:.35}40%{transform:translateY(-5px);opacity:1}}
+@keyframes ringGrow{from{stroke-dashoffset:var(--circ)}to{stroke-dashoffset:var(--offset)}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef} = React;
+
+// ── HARDCODED API KEY ──
+const API_KEY="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";
+
+const BASE_SYS=`You are MedExplain AI — a professional health literacy assistant. Use simple, everyday language. Never diagnose — provide educational health guidance only.
+If symptoms suggest an emergency (chest pain, difficulty breathing, stroke signs, severe bleeding, sudden vision loss, severe allergic reaction), respond IMMEDIATELY with "⚠️ EMERGENCY: Call 911 or go to the nearest emergency room immediately." then explain why.
+Be compassionate but professional. Use short paragraphs.`;
+
+const CONVO_SYS=BASE_SYS+`\n\nYou conduct structured health assessments. Ask ONE clear follow-up question per response to understand the user's situation, like a doctor would. Be conversational and warm.`;
+
+const SUMMARY_SYS=BASE_SYS+`\n\nBased on the conversation, provide a health assessment. Respond with ONLY valid JSON (no markdown fences). Use this schema:
+{"possibleConditions":[{"name":"Condition name","likelihood":65,"description":"One sentence explanation"}],"urgencyLevel":"LOW|MEDIUM|HIGH","urgencyNote":"Brief explanation of urgency","nextSteps":["Step 1","Step 2","Step 3"],"warningSignsToWatch":["Sign 1","Sign 2"],"specialistType":"Type of doctor to see","overallRiskScore":35,"medicationNote":"Any OTC medication suggestions or 'None recommended without doctor consultation'"}
+The overallRiskScore is 0-100 representing how concerning the symptoms are. Include 2-4 possible conditions with realistic percentages.`;
+
+const VISUAL_SYS=BASE_SYS+`\n\nAnalyze the image of a visible symptom. Respond with ONLY valid JSON:
+{"observation":"What you see","possibleConditions":[{"name":"Condition","likelihood":50,"description":"Brief explanation"}],"urgencyLevel":"LOW|MEDIUM|HIGH","careSteps":["Step 1","Step 2"],"seeDoctor":"When to see a doctor","overallRiskScore":25}`;
+
+const MED_SYS=BASE_SYS+`\n\nExplain the medical instructions in simple language. Format with clear sections:\n• What This Means\n• When & How To Take It\n• Important Warnings\n• Helpful Tips`;
+
+async function callClaude(sys,msgs){
+  try{
+    const r=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",headers:{"Content-Type":"application/json","x-api-key":API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1200,system:sys,messages:msgs})
+    });
+    const d=await r.json();
+    if(d.error) return {ok:false,text:"API Error: "+d.error.message};
+    return d.content?.[0]?{ok:true,text:d.content[0].text}:{ok:false,text:"Something went wrong."};
+  }catch(e){return{ok:false,text:"Connection error: "+e.message};}
+}
+
+async function callClaudeVision(sys,text,b64,mt){
+  try{
+    const r=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",headers:{"Content-Type":"application/json","x-api-key":API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1200,system:sys,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:mt,data:b64}},{type:"text",text}]}]})
+    });
+    const d=await r.json();
+    if(d.error) return {ok:false,text:"API Error: "+d.error.message};
+    return d.content?.[0]?{ok:true,text:d.content[0].text}:{ok:false,text:"Could not analyze."};
+  }catch(e){return{ok:false,text:"Connection error."};}
+}
+
+function tryParseJSON(text){try{return JSON.parse(text.replace(/```json|```/g,"").trim())}catch{return null}}
+
+const FACILITIES={
+  dermatologist:[{name:"Dermatology Associates of Northern Virginia",type:"Dermatologist",rating:4.8,dist:"0.8 mi",time:"6 min",lat:38.8531,lng:-77.2997},{name:"Fairfax Skin & Cancer Center",type:"Dermatology",rating:4.6,dist:"2.1 mi",time:"12 min",lat:38.8612,lng:-77.2635}],
+  cardiologist:[{name:"Virginia Heart",type:"Cardiology",rating:4.9,dist:"1.2 mi",time:"8 min",lat:38.8601,lng:-77.2271},{name:"Inova Heart & Vascular Institute",type:"Hospital",rating:4.7,dist:"2.8 mi",time:"13 min",lat:38.8603,lng:-77.2278}],
+  er:[{name:"Inova Fairfax Hospital — ER",type:"Emergency",rating:4.6,dist:"1.5 mi",time:"7 min",lat:38.8604,lng:-77.2274},{name:"Reston Hospital Center — ER",type:"Emergency",rating:4.4,dist:"2.9 mi",time:"12 min",lat:38.9529,lng:-77.3428}],
+  "urgent care":[{name:"Patient First — Fairfax",type:"Urgent Care",rating:4.5,dist:"0.6 mi",time:"4 min",lat:38.8493,lng:-77.31},{name:"MedExpress Urgent Care",type:"Urgent Care",rating:4.3,dist:"1.4 mi",time:"8 min",lat:38.8585,lng:-77.2862},{name:"Inova Urgent Care — Fairfax",type:"Urgent Care",rating:4.4,dist:"2.2 mi",time:"11 min",lat:38.8634,lng:-77.259}],
+  "primary care":[{name:"Fairfax Family Practice",type:"Primary Care",rating:4.7,dist:"0.5 mi",time:"3 min",lat:38.846,lng:-77.305},{name:"Inova Primary Care — Fair Oaks",type:"Primary Care",rating:4.5,dist:"1.1 mi",time:"7 min",lat:38.863,lng:-77.3581}],
+  pulmonologist:[{name:"Pulmonary Associates of Northern VA",type:"Pulmonologist",rating:4.7,dist:"1.3 mi",time:"8 min",lat:38.855,lng:-77.291}],
+  orthopedist:[{name:"OrthoVirginia — Fairfax",type:"Orthopedics",rating:4.8,dist:"1.0 mi",time:"6 min",lat:38.8515,lng:-77.2945},{name:"Inova Orthopedic & Spine",type:"Orthopedics",rating:4.6,dist:"2.4 mi",time:"12 min",lat:38.8607,lng:-77.228}]
+};
+function matchFacilities(s){if(!s)return FACILITIES["primary care"];const k=Object.keys(FACILITIES).find(k=>s.toLowerCase().includes(k));return FACILITIES[k]||FACILITIES["urgent care"]}
+
+function Dots(){return <div style={{display:"flex",gap:5,padding:"12px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:"var(--accent)",animation:`bounce 1.4s ease-in-out ${i*.15}s infinite`}}/>)}</div>}
+
+function RiskGauge({score,size=160,stroke=12}){
+  const r=(size-stroke)/2,circ=2*Math.PI*r,offset=circ-(score/100)*circ;
+  let color="var(--ok)",label="Low Risk",bg="var(--ok-soft)";
+  if(score>=70){color="var(--danger)";label="High Risk";bg="var(--danger-soft)"}else if(score>=40){color="var(--warn)";label="Moderate Risk";bg="var(--warn-soft)"}
+  return <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10}}>
+    <div style={{position:"relative",width:size,height:size}}>
+      <svg width={size} height={size} style={{transform:"rotate(-90deg)"}}>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="var(--border)" strokeWidth={stroke}/>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round" strokeDasharray={circ} strokeDashoffset={offset} style={{"--circ":circ,"--offset":offset,animation:"ringGrow 1.2s ease-out forwards"}}/>
+      </svg>
+      <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+        <span style={{fontSize:36,fontWeight:800,color,fontFamily:"var(--hd)",letterSpacing:-1}}>{score}</span>
+        <span style={{fontSize:11,fontWeight:600,color:"var(--text-3)",fontFamily:"var(--hd)",textTransform:"uppercase",letterSpacing:.8}}>/ 100</span>
+      </div>
+    </div>
+    <div style={{background:bg,padding:"6px 16px",borderRadius:20,fontSize:13,fontWeight:600,color,fontFamily:"var(--hd)"}}>{label}</div>
+  </div>
+}
+
+function ConditionBar({name,likelihood,description,delay=0}){
+  let color="var(--ok)";if(likelihood>=60)color="var(--danger)";else if(likelihood>=35)color="var(--warn)";
+  return <div style={{animation:`up 0.4s ease-out ${delay}s both`}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:5}}>
+      <span style={{fontWeight:600,fontSize:14,color:"var(--text)",fontFamily:"var(--hd)"}}>{name}</span>
+      <span style={{fontWeight:700,fontSize:14,color,fontFamily:"var(--hd)"}}>{likelihood}%</span>
+    </div>
+    <div style={{height:8,borderRadius:4,background:"var(--surface-alt)",overflow:"hidden",marginBottom:4}}>
+      <div style={{height:"100%",width:`${likelihood}%`,background:color,borderRadius:4,transition:"width 1s ease-out"}}/>
+    </div>
+    <p style={{fontSize:13,color:"var(--text-2)",fontFamily:"var(--bd)",lineHeight:1.55,margin:"0 0 4px"}}>{description}</p>
+  </div>
+}
+
+function WelcomeScreen({onStart}){
+  return <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"40px 24px",background:"linear-gradient(170deg,#f7f8fb 0%,#e6f1f8 50%,#f7f8fb 100%)"}}>
+    <div style={{textAlign:"center",maxWidth:440,animation:"up 0.7s ease-out"}}>
+      <div style={{width:72,height:72,borderRadius:18,background:"var(--accent)",display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:28,boxShadow:"0 8px 32px rgba(26,111,160,0.2)"}}>
+        <span style={{color:"#fff",fontSize:32,fontWeight:800,fontFamily:"var(--hd)"}}>M</span>
+      </div>
+      <h1 style={{fontSize:32,fontWeight:800,color:"var(--text)",fontFamily:"var(--hd)",letterSpacing:-.5,marginBottom:12}}>MedExplain AI</h1>
+      <p style={{fontSize:17,color:"var(--text-2)",fontFamily:"var(--bd)",lineHeight:1.65,marginBottom:8}}>Your intelligent health assistant that helps you understand symptoms, medications, and medical instructions.</p>
+      <p style={{fontSize:14,color:"var(--text-3)",fontFamily:"var(--hd)",lineHeight:1.5,marginBottom:36}}>Describe how you're feeling, and the AI will guide you through an assessment — just like talking to a doctor.</p>
+      <button onClick={onStart} style={{padding:"15px 48px",borderRadius:12,border:"none",background:"var(--accent)",color:"#fff",fontSize:16,fontWeight:700,fontFamily:"var(--hd)",cursor:"pointer",letterSpacing:.3,boxShadow:"0 4px 20px rgba(26,111,160,0.25)",transition:"all 0.25s"}}
+        onMouseEnter={e=>{e.currentTarget.style.background="var(--accent-hover)";e.currentTarget.style.transform="translateY(-1px)"}}
+        onMouseLeave={e=>{e.currentTarget.style.background="var(--accent)";e.currentTarget.style.transform="translateY(0)"}}>
+        Start Health Assessment
+      </button>
+      <div style={{display:"flex",justifyContent:"center",gap:24,marginTop:36}}>
+        {[["💬","AI Triage"],["📷","Visual Scan"],["📄","Med Translator"],["📍","Find Care"]].map(([ico,lbl])=>
+          <div key={lbl} style={{textAlign:"center"}}><div style={{fontSize:22,marginBottom:4}}>{ico}</div><div style={{fontSize:11,color:"var(--text-3)",fontFamily:"var(--hd)",fontWeight:500}}>{lbl}</div></div>
+        )}
+      </div>
+    </div>
+    <div style={{marginTop:48,fontSize:12,color:"var(--text-3)",fontFamily:"var(--hd)",textAlign:"center",lineHeight:1.5}}>For educational purposes only. Always consult a healthcare professional.</div>
+  </div>
+}
+
+function ResultsPanel({data,conversation}){
+  const[showMap,setShowMap]=useState(false);
+  const[userLoc,setUserLoc]=useState({lat:38.8462,lng:-77.3064});
+  const[locStatus,setLocStatus]=useState("idle");
+  const[showMeds,setShowMeds]=useState(false);
+  const[meds,setMeds]=useState("");
+  if(!data)return null;
+  const places=matchFacilities(data.specialistType);
+  const urgMap={LOW:{bg:"var(--ok-soft)",border:"#b0d9c5",color:"var(--ok)",label:"Low Urgency"},MEDIUM:{bg:"var(--warn-soft)",border:"#f0d99a",color:"var(--warn)",label:"Moderate Urgency"},HIGH:{bg:"var(--danger-soft)",border:"#e8b0ac",color:"var(--danger)",label:"High Urgency"}};
+  const u=urgMap[data.urgencyLevel]||urgMap.MEDIUM;
+  const openMap=()=>{if(showMap){setShowMap(false);return}setShowMap(true);if(locStatus==="idle"&&navigator.geolocation){setLocStatus("loading");navigator.geolocation.getCurrentPosition(pos=>{setUserLoc({lat:pos.coords.latitude,lng:pos.coords.longitude});setLocStatus("done")},()=>setLocStatus("denied"),{timeout:8000})}};
+
+  const generateReport=()=>{
+    const now=new Date(),dateStr=now.toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"}),timeStr=now.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"});
+    const convoHTML=(conversation||[]).filter(m=>!m.image).map(m=>`<div style="margin-bottom:12px;padding:10px 14px;border-radius:8px;background:${m.role==="user"?"#e6f1f8":"#f8f9fb"};border:1px solid ${m.role==="user"?"#b5d4e8":"#e3e7ed"};"><div style="font-size:11px;font-weight:600;color:${m.role==="user"?"#1a6fa0":"#4a5d72"};margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px;">${m.role==="user"?"Patient":"AI Health Assistant"}</div><div style="font-size:13px;line-height:1.6;color:#0c1b2e;white-space:pre-wrap;">${m.content}</div></div>`).join("");
+    const condHTML=(data.possibleConditions||[]).map(c=>`<div style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span style="font-weight:600;font-size:13px;">${c.name}</span><span style="font-weight:700;font-size:13px;color:#4a5d72;">${c.likelihood}%</span></div><div style="height:6px;border-radius:3px;background:#e3e7ed;overflow:hidden;"><div style="height:100%;width:${c.likelihood}%;background:${c.likelihood>=60?"#be3a34":c.likelihood>=35?"#c9800a":"#1a845a"};border-radius:3px;"></div></div><div style="font-size:12px;color:#4a5d72;margin-top:3px;">${c.description}</div></div>`).join("");
+    const stepsHTML=(data.nextSteps||[]).map((s,i)=>`<div style="display:flex;gap:10px;margin-bottom:8px;"><div style="width:20px;height:20px;border-radius:50%;background:#e6f1f8;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#1a6fa0;flex-shrink:0;">${i+1}</div><div style="font-size:13px;line-height:1.5;">${s}</div></div>`).join("");
+    const warnHTML=(data.warningSignsToWatch||[]).map(w=>`<div style="font-size:13px;color:#be3a34;margin-bottom:4px;">• ${w}</div>`).join("");
+    const medsHTML=meds.trim()?`<div style="margin-top:20px;padding:16px;border:1px solid #b5d4e8;border-radius:8px;background:#e6f1f8;"><h3 style="font-size:12px;font-weight:600;color:#1a6fa0;text-transform:uppercase;letter-spacing:0.8px;margin:0 0 8px;">Current Medications</h3><p style="font-size:13px;line-height:1.6;color:#0c1b2e;margin:0;white-space:pre-wrap;">${meds}</p></div>`:"";
+    const rc=data.overallRiskScore>=70?"#be3a34":data.overallRiskScore>=40?"#c9800a":"#1a845a";
+    const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>MedExplain AI Report</title><style>@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Plus Jakarta Sans',sans-serif;color:#0c1b2e;background:#fff;padding:40px;max-width:720px;margin:0 auto}@media print{body{padding:20px}.no-print{display:none!important}}h2{font-size:14px;font-weight:600;color:#8a97a8;text-transform:uppercase;letter-spacing:1px;margin:28px 0 12px;padding-bottom:8px;border-bottom:1px solid #e3e7ed}</style></head><body><div style="text-align:center;margin-bottom:32px;padding-bottom:24px;border-bottom:2px solid #1a6fa0;"><div style="display:inline-block;width:48px;height:48px;border-radius:12px;background:#1a6fa0;color:#fff;font-size:24px;font-weight:800;line-height:48px;margin-bottom:12px;">M</div><h1 style="font-size:22px;font-weight:800;margin-bottom:4px;">Health Assessment Report</h1><p style="font-size:13px;color:#8a97a8;">MedExplain AI · ${dateStr} at ${timeStr}</p></div><div class="no-print" style="background:#fef8ec;border:1px solid #f0d99a;border-radius:8px;padding:12px 16px;margin-bottom:24px;text-align:center;"><button onclick="window.print()" style="padding:8px 24px;border-radius:8px;border:none;background:#1a6fa0;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">Print / Save as PDF</button></div><div style="background:#f7f8fb;border-radius:10px;padding:20px;border:1px solid #e3e7ed;margin-bottom:24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;justify-content:center;"><div style="text-align:center;"><div style="font-size:42px;font-weight:800;color:${rc};">${data.overallRiskScore}</div><div style="font-size:11px;color:#8a97a8;font-weight:600;text-transform:uppercase;">Risk Score / 100</div></div><div style="flex:1;min-width:200px;"><div style="background:${u.bg};border:1px solid ${u.border};border-radius:6px;padding:8px 14px;margin-bottom:8px;font-weight:600;font-size:13px;color:${u.color};">${u.label}</div><p style="font-size:13px;color:#4a5d72;line-height:1.5;">${data.urgencyNote||""}</p></div></div>${condHTML?`<h2>Possible Explanations</h2>${condHTML}`:""} ${stepsHTML?`<h2>Next Steps</h2>${stepsHTML}`:""} ${warnHTML?`<h2 style="color:#be3a34;">Warning Signs</h2>${warnHTML}`:""} ${data.specialistType?`<h2>Recommended Provider</h2><p style="font-size:14px;font-weight:600;">${data.specialistType}</p>`:""} ${data.medicationNote?`<h2>Medication Note</h2><p style="font-size:13px;line-height:1.6;">${data.medicationNote}</p>`:""} ${medsHTML} <h2>Conversation Log</h2>${convoHTML}<div style="margin-top:32px;padding-top:16px;border-top:2px solid #e3e7ed;text-align:center;"><p style="font-size:11px;color:#8a97a8;">Generated by MedExplain AI for educational purposes only.</p></div></body></html>`;
+    const w=window.open("","_blank");if(w){w.document.write(html);w.document.close()}
+  };
+
+  return <div style={{display:"flex",flexDirection:"column",gap:16,animation:"up 0.5s ease-out"}}>
+    <div style={{background:"var(--surface)",borderRadius:"var(--rl)",padding:"28px 24px",border:"1px solid var(--border)"}}>
+      <h3 style={{fontSize:13,fontWeight:600,color:"var(--text-3)",fontFamily:"var(--hd)",textTransform:"uppercase",letterSpacing:.8,marginBottom:20}}>Risk Assessment</h3>
+      <div style={{display:"flex",alignItems:"center",gap:28,flexWrap:"wrap",justifyContent:"center"}}>
+        <RiskGauge score={data.overallRiskScore||30}/>
+        <div style={{flex:1,minWidth:180}}>
+          <div style={{background:u.bg,border:`1px solid ${u.border}`,borderRadius:"var(--r)",padding:"10px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:8}}><div style={{width:8,height:8,borderRadius:"50%",background:u.color}}/><span style={{fontWeight:600,fontSize:14,color:u.color,fontFamily:"var(--hd)"}}>{u.label}</span></div>
+          <p style={{fontSize:14,color:"var(--text-2)",fontFamily:"var(--bd)",lineHeight:1.6}}>{data.urgencyNote}</p>
+        </div>
+      </div>
+    </div>
+    {data.possibleConditions?.length>0&&<div style={{background:"var(--surface)",borderRadius:"var(--rl)",padding:"24px",border:"1px solid var(--border)"}}>
+      <h3 style={{fontSize:13,fontWeight:600,color:"var(--text-3)",fontFamily:"var(--hd)",textTransform:"uppercase",letterSpacing:.8,marginBottom:16}}>Possible Explanations</h3>
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>{data.possibleConditions.map((c,i)=><ConditionBar key={i} name={c.name} likelihood={c.likelihood} description={c.description} delay={i*.1}/>)}</div>
+      <p style={{fontSize:12,color:"var(--text-3)",fontFamily:"var(--hd)",marginTop:14,fontStyle:"italic"}}>Educational possibilities, not diagnoses.</p>
+    </div>}
+    {data.nextSteps?.length>0&&<div style={{background:"var(--surface)",borderRadius:"var(--rl)",padding:"24px",border:"1px solid var(--border)"}}>
+      <h3 style={{fontSize:13,fontWeight:600,color:"var(--text-3)",fontFamily:"var(--hd)",textTransform:"uppercase",letterSpacing:.8,marginBottom:14}}>Recommended Next Steps</h3>
+      {data.nextSteps.map((s,i)=><div key={i} style={{display:"flex",gap:12,alignItems:"flex-start",marginBottom:10,animation:`up 0.3s ease-out ${i*.08}s both`}}><div style={{width:24,height:24,borderRadius:"50%",background:"var(--accent-soft)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"var(--accent)",flexShrink:0}}>{i+1}</div><p style={{fontSize:14,color:"var(--text)",fontFamily:"var(--bd)",lineHeight:1.6,margin:0}}>{s}</p></div>)}
+    </div>}
+    {data.warningSignsToWatch?.length>0&&<div style={{background:"var(--danger-soft)",borderRadius:"var(--rl)",padding:"20px 24px",border:"1px solid #e8b0ac"}}>
+      <h3 style={{fontSize:13,fontWeight:600,color:"var(--danger)",fontFamily:"var(--hd)",textTransform:"uppercase",letterSpacing:.8,marginBottom:10}}>⚠ Warning Signs</h3>
+      {data.warningSignsToWatch.map((w,i)=><p key={i} style={{fontSize:14,color:"var(--danger)",fontFamily:"var(--bd)",lineHeight:1.55,margin:"0 0 4px"}}>• {w}</p>)}
+    </div>}
+    <div style={{background:"var(--surface)",borderRadius:"var(--rl)",padding:"24px",border:"1px solid var(--border)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+        <h3 style={{fontSize:13,fontWeight:600,color:"var(--text-3)",fontFamily:"var(--hd)",textTransform:"uppercase",letterSpacing:.8}}>Recommended: {data.specialistType||"Healthcare Provider"}</h3>
+        <button onClick={openMap} style={{padding:"7px 14px",borderRadius:"var(--r)",border:showMap?"1.5px solid var(--accent)":"1.5px solid var(--border)",background:showMap?"var(--accent-soft)":"var(--surface)",color:showMap?"var(--accent)":"var(--text-2)",fontSize:13,fontWeight:600,fontFamily:"var(--hd)",cursor:"pointer"}}>📍 {showMap?"Hide Map":"View Map"}</button>
+      </div>
+      <p style={{fontSize:12,color:"var(--text-3)",fontFamily:"var(--hd)",marginBottom:14}}>Nearby options</p>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {places.map((p,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 16px",borderRadius:"var(--r)",border:"1px solid var(--border)",background:"var(--surface-alt)",animation:`up 0.3s ease-out ${i*.08}s both`}}>
+          <div style={{flex:1}}><div style={{fontWeight:600,fontSize:14,color:"var(--text)",fontFamily:"var(--hd)",marginBottom:2}}>{p.name}</div><div style={{fontSize:12,color:"var(--text-2)",fontFamily:"var(--hd)"}}>{p.type} · {p.dist} · {p.time} drive</div></div>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+            <div style={{background:"var(--accent-soft)",borderRadius:6,padding:"3px 10px",fontWeight:700,fontSize:13,color:"var(--accent)",fontFamily:"var(--hd)"}}>★ {p.rating}</div>
+            <a href={`https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}`} target="_blank" rel="noopener noreferrer" style={{display:"flex",alignItems:"center",justifyContent:"center",width:32,height:32,borderRadius:8,background:"var(--accent)",color:"#fff",textDecoration:"none",fontSize:14}}>↗</a>
+          </div>
+        </div>)}
+      </div>
+    </div>
+    {data.medicationNote&&<div style={{background:"var(--accent-soft)",borderRadius:"var(--rl)",padding:"18px 22px",border:"1px solid #b5d4e8"}}><h3 style={{fontSize:13,fontWeight:600,color:"var(--accent)",fontFamily:"var(--hd)",textTransform:"uppercase",letterSpacing:.8,marginBottom:8}}>Medication Note</h3><p style={{fontSize:14,color:"var(--text)",fontFamily:"var(--bd)",lineHeight:1.6,margin:0}}>{data.medicationNote}</p></div>}
+    <div style={{background:"var(--surface)",borderRadius:"var(--rl)",padding:"24px",border:"1px solid var(--border)"}}>
+      <h3 style={{fontSize:13,fontWeight:600,color:"var(--text-3)",fontFamily:"var(--hd)",textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>Prepare for Your Visit</h3>
+      <p style={{fontSize:14,color:"var(--text-2)",fontFamily:"var(--bd)",lineHeight:1.6,marginBottom:16}}>Generate a printable report to bring to your doctor.</p>
+      {!showMeds?<button onClick={()=>setShowMeds(true)} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 16px",borderRadius:"var(--r)",border:"1.5px solid var(--border)",background:"var(--surface)",color:"var(--text-2)",fontSize:13,fontWeight:500,fontFamily:"var(--hd)",cursor:"pointer",marginBottom:14}}>💊 Add current medications <span style={{fontSize:11,color:"var(--text-3)",marginLeft:4}}>(optional)</span></button>
+      :<div style={{marginBottom:14,animation:"up 0.3s ease-out"}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><label style={{fontSize:13,fontWeight:600,color:"var(--text)",fontFamily:"var(--hd)"}}>💊 Current Medications</label><button onClick={()=>{setShowMeds(false);setMeds("")}} style={{background:"none",border:"none",color:"var(--text-3)",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Remove</button></div><textarea value={meds} onChange={e=>setMeds(e.target.value)} placeholder="List medications..." style={{width:"100%",minHeight:80,padding:12,borderRadius:"var(--r)",border:"1.5px solid var(--border)",fontSize:14,fontFamily:"var(--bd)",outline:"none",resize:"vertical",lineHeight:1.6,background:"var(--surface-alt)"}}/></div>}
+      <button onClick={generateReport} style={{width:"100%",padding:"13px 24px",borderRadius:"var(--r)",border:"none",background:"var(--accent)",color:"#fff",fontSize:15,fontWeight:700,fontFamily:"var(--hd)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>📋 Generate Doctor Visit Report</button>
+      <p style={{fontSize:11,color:"var(--text-3)",fontFamily:"var(--hd)",textAlign:"center",marginTop:8}}>Opens in a new tab · Print to save as PDF</p>
+    </div>
+  </div>
+}
+
+function App(){
+  const[phase,setPhase]=useState("welcome");
+  const[msgs,setMsgs]=useState([]);
+  const[input,setInput]=useState("");
+  const[loading,setLoading]=useState(false);
+  const[turns,setTurns]=useState(0);
+  const[summary,setSummary]=useState(null);
+  const[showResults,setShowResults]=useState(false);
+  const[imgPreview,setImgPreview]=useState(null);
+  const[img64,setImg64]=useState(null);
+  const[imgType,setImgType]=useState(null);
+  const[imgContext,setImgContext]=useState("");
+  const[medInput,setMedInput]=useState("");
+  const[medResult,setMedResult]=useState(null);
+  const[medLoading,setMedLoading]=useState(false);
+  const endRef=useRef(null);const fileRef=useRef(null);const resultsRef=useRef(null);
+
+  useEffect(()=>{endRef.current?.scrollIntoView({behavior:"smooth"})},[msgs,loading]);
+  useEffect(()=>{if(showResults)resultsRef.current?.scrollIntoView({behavior:"smooth"})},[showResults]);
+
+  const startChat=async()=>{setPhase("chat");setLoading(true);const res=await callClaude(CONVO_SYS+"\n\nStart by warmly greeting the user and asking what brings them in today. Keep it brief.",[{role:"user",content:"I'd like a health assessment."}]);setMsgs([{role:"assistant",content:res.text}]);setLoading(false)};
+  const send=async()=>{if(!input.trim()||loading)return;const text=input.trim();setInput("");const next=[...msgs,{role:"user",content:text}];setMsgs(next);setLoading(true);const n=turns+1;setTurns(n);let sys=CONVO_SYS;if(n>=5)sys+="\n\nProvide your summary now.";const res=await callClaude(sys,next.map(m=>({role:m.role,content:m.content})));const updated=[...next,{role:"assistant",content:res.text}];setMsgs(updated);if(n>=5||res.text.toUpperCase().includes("EMERGENCY")){const smsg=updated.map(m=>({role:m.role,content:m.content}));smsg.push({role:"user",content:"Provide the structured JSON health assessment now."});const sr=await callClaude(SUMMARY_SYS,smsg);const p=tryParseJSON(sr.text);if(p){setSummary(p);setShowResults(true)}}setLoading(false)};
+  const continueChat=async()=>{if(!input.trim()||loading)return;const text=input.trim();setInput("");const next=[...msgs,{role:"user",content:text}];setMsgs(next);setLoading(true);const res=await callClaude(BASE_SYS+"\n\nContinue helping the user.",next.map(m=>({role:m.role,content:m.content})));setMsgs(prev=>[...prev,{role:"assistant",content:res.text}]);setLoading(false)};
+  const onFile=e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=ev=>{setImgPreview(ev.target.result);setImg64(ev.target.result.split(",")[1]);setImgType(f.type)};r.readAsDataURL(f)};
+  const scanImage=async()=>{if(!img64)return;const ctx=imgContext.trim()||"Can you analyze this symptom?";setMsgs(prev=>[...prev,{role:"user",content:ctx,image:imgPreview}]);setLoading(true);const prompt=`Analyze this visible symptom.${imgContext.trim()?` User says: "${imgContext.trim()}"`:""}`;const res=await callClaudeVision(VISUAL_SYS,prompt,img64,imgType);const parsed=tryParseJSON(res.text);if(parsed){setSummary({possibleConditions:parsed.possibleConditions||[],urgencyLevel:parsed.urgencyLevel||"LOW",urgencyNote:parsed.seeDoctor||"",nextSteps:parsed.careSteps||[],warningSignsToWatch:[],specialistType:"Dermatologist",overallRiskScore:parsed.overallRiskScore||20,medicationNote:null});setMsgs(prev=>[...prev,{role:"assistant",content:`I've analyzed your image.\n\n${parsed.observation}\n\nResults below.`}]);setShowResults(true)}else{setMsgs(prev=>[...prev,{role:"assistant",content:res.text}])}setImgPreview(null);setImg64(null);setImgContext("");setLoading(false)};
+  const translateMed=async()=>{if(!medInput.trim())return;setMedLoading(true);setMedResult(null);const res=await callClaude(MED_SYS,[{role:"user",content:`Explain: "${medInput}"`}]);setMedResult(res.text);setMedLoading(false)};
+  const restart=()=>{setPhase("welcome");setMsgs([]);setInput("");setTurns(0);setSummary(null);setShowResults(false);setImgPreview(null);setImg64(null);setMedInput("");setMedResult(null)};
+
+  if(phase==="welcome") return <WelcomeScreen onStart={startChat}/>;
+
+  return <div style={{minHeight:"100vh",background:"var(--bg)",fontFamily:"var(--hd)"}}>
+    <header style={{background:"var(--surface)",borderBottom:"1px solid var(--border)",padding:"0 20px",height:56,display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:50,boxShadow:"0 1px 3px rgba(0,0,0,0.04)"}}>
+      <div style={{display:"flex",alignItems:"center",gap:12}}><div style={{width:30,height:30,borderRadius:8,background:"var(--accent)",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:15,fontWeight:800}}>M</div><span style={{fontWeight:700,fontSize:16,color:"var(--text)",letterSpacing:-.2}}>MedExplain AI</span></div>
+      <button onClick={restart} style={{background:"none",border:"1px solid var(--border)",borderRadius:"var(--r)",padding:"6px 14px",fontSize:13,color:"var(--text-2)",fontFamily:"var(--hd)",fontWeight:500,cursor:"pointer"}}>New Assessment</button>
+    </header>
+    <div style={{maxWidth:640,margin:"0 auto",padding:"20px 16px 48px"}}>
+      <div style={{background:"var(--surface)",borderRadius:"var(--rl)",padding:20,border:"1px solid var(--border)",boxShadow:"0 2px 8px rgba(0,0,0,0.03)",marginBottom:16,minHeight:200}}>
+        <div style={{maxHeight:400,overflowY:"auto",marginBottom:16}}>
+          {msgs.map((m,i)=><div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start",marginBottom:12,animation:"up 0.3s ease-out"}}>
+            {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:"var(--accent-soft)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,marginRight:10,flexShrink:0,marginTop:2,border:"1px solid var(--border)"}}>🩺</div>}
+            <div style={{maxWidth:"80%",padding:"12px 16px",borderRadius:"var(--rl)",background:m.role==="user"?"var(--accent)":"var(--surface-alt)",color:m.role==="user"?"#fff":"var(--text)",fontSize:15,lineHeight:1.7,whiteSpace:"pre-wrap",fontFamily:m.role==="user"?"var(--hd)":"var(--bd)",fontWeight:m.role==="user"?500:400,borderBottomRightRadius:m.role==="user"?3:"var(--rl)",borderBottomLeftRadius:m.role==="user"?"var(--rl)":3,border:m.role==="assistant"?"1px solid var(--border)":"none"}}>
+              {m.image&&<img src={m.image} alt="symptom" style={{maxWidth:"100%",maxHeight:160,borderRadius:8,marginBottom:m.content?8:0,display:"block"}}/>}
+              {m.content}
+            </div>
+          </div>)}
+          {loading&&<div style={{display:"flex",gap:10}}><div style={{width:28,height:28,borderRadius:"50%",background:"var(--accent-soft)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,border:"1px solid var(--border)"}}>🩺</div><div style={{background:"var(--surface-alt)",borderRadius:"var(--r)",padding:"6px 18px",border:"1px solid var(--border)",borderBottomLeftRadius:3}}><Dots/></div></div>}
+          <div ref={endRef}/>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} style={{display:"none"}}/>
+          <button onClick={()=>fileRef.current?.click()} style={{width:40,height:40,borderRadius:"var(--r)",border:"1.5px solid var(--border)",background:"var(--surface)",fontSize:16,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>📷</button>
+          <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){showResults?continueChat():send()}}} placeholder={showResults?"Ask a follow-up...":"Describe how you're feeling..."} disabled={loading} style={{flex:1,height:40,padding:"0 14px",borderRadius:"var(--r)",border:"1.5px solid var(--border)",fontSize:14,fontFamily:"var(--hd)",outline:"none",background:"var(--surface)",color:"var(--text)"}}/>
+          <button onClick={showResults?continueChat:send} disabled={loading||!input.trim()} style={{height:40,padding:"0 20px",borderRadius:"var(--r)",border:"none",background:(!input.trim()||loading)?"#b0c4d4":"var(--accent)",color:"#fff",fontSize:14,fontWeight:600,fontFamily:"var(--hd)",cursor:(!input.trim()||loading)?"not-allowed":"pointer",flexShrink:0}}>Send</button>
+        </div>
+        {imgPreview&&<div style={{marginTop:12,padding:14,background:"var(--surface-alt)",borderRadius:"var(--r)",border:"1px solid var(--border)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}><img src={imgPreview} alt="scan" style={{height:64,width:64,objectFit:"cover",borderRadius:8,border:"1px solid var(--border)"}}/><div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:"var(--text)"}}>Photo attached</div><div style={{fontSize:12,color:"var(--text-3)"}}>Add description or tap Analyze</div></div><button onClick={()=>{setImgPreview(null);setImg64(null);setImgContext("")}} style={{background:"none",border:"none",color:"var(--text-3)",cursor:"pointer",fontSize:18}}>×</button></div>
+          <input value={imgContext} onChange={e=>setImgContext(e.target.value)} placeholder="Describe the photo (optional)..." onKeyDown={e=>{if(e.key==="Enter")scanImage()}} style={{width:"100%",padding:"10px 14px",borderRadius:"var(--r)",border:"1.5px solid var(--border)",fontSize:14,fontFamily:"var(--hd)",outline:"none",background:"var(--surface)",marginBottom:10}}/>
+          <button onClick={scanImage} disabled={loading} style={{width:"100%",padding:"10px 16px",borderRadius:"var(--r)",border:"none",background:loading?"#b0c4d4":"var(--accent)",color:"#fff",fontSize:14,fontWeight:600,fontFamily:"var(--hd)",cursor:loading?"wait":"pointer"}}>{loading?"Analyzing...":"📷 Analyze Symptom"}</button>
+        </div>}
+      </div>
+      <details style={{background:"var(--surface)",borderRadius:"var(--rl)",border:"1px solid var(--border)",marginBottom:16,overflow:"hidden"}}>
+        <summary style={{padding:"14px 20px",cursor:"pointer",fontSize:14,fontWeight:600,color:"var(--text)",fontFamily:"var(--hd)",listStyle:"none",display:"flex",alignItems:"center",gap:10}}><span>📄</span> Medical Translator <span style={{fontSize:12,color:"var(--text-3)",fontWeight:400,marginLeft:"auto"}}>Paste instructions for explanation</span></summary>
+        <div style={{padding:"0 20px 20px"}}>
+          <textarea value={medInput} onChange={e=>setMedInput(e.target.value)} placeholder="Paste medical instructions here..." style={{width:"100%",minHeight:80,padding:12,borderRadius:"var(--r)",border:"1.5px solid var(--border)",fontSize:14,fontFamily:"var(--bd)",outline:"none",resize:"vertical",lineHeight:1.6,background:"var(--surface-alt)"}}/>
+          <button onClick={translateMed} disabled={medLoading||!medInput.trim()} style={{marginTop:8,padding:"9px 20px",borderRadius:"var(--r)",border:"none",background:medLoading?"#b0c4d4":"var(--accent)",color:"#fff",fontSize:13,fontWeight:600,fontFamily:"var(--hd)",cursor:medLoading?"wait":"pointer"}}>{medLoading?"Translating...":"Explain This"}</button>
+          {medLoading&&<Dots/>}
+          {medResult&&<div style={{marginTop:12,padding:16,background:"var(--surface-alt)",borderRadius:"var(--r)",border:"1px solid var(--border)",whiteSpace:"pre-wrap",fontSize:14,fontFamily:"var(--bd)",lineHeight:1.75,color:"var(--text)"}}>{medResult}</div>}
+        </div>
+      </details>
+      <div ref={resultsRef}>{showResults&&<ResultsPanel data={summary} conversation={msgs}/>}</div>
+    </div>
+  </div>
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
